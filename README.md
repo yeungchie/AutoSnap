@@ -1,4 +1,4 @@
-# AutoSnap  
+# AutoSnap[待完善]  
 
 用于垂直线段的自动吸附  
 
