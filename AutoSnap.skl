@@ -1,0 +1,375 @@
+/*	Author:YEUNGCHIE
+	Tips:需要设置一下工艺相关的信息。在第50行和300行左右。只对path/pathseg有效，且都会变成pathseg。
+ 	Describe:
+		AutoSnap(l_pathsobj)
+			l_pathsobj:包含两条path/pathseg对象的list。
+			用于快速吸附两条相互垂直的path/pathseg。
+			
+		AutoSnapByHi(
+			?cv d_cv
+			?mode t_mode
+			?snapbynet g_switch
+			?rmmpp g_switch
+			?addvia g_switch
+			?viamin l_minsize
+		)
+			?cv:默认当前编辑的cellview。
+			?mode:设置操作方式，可选"click"吸附鼠标最接近的两条path和"line"批量吸附两组垂直path，默认是"click"。
+			?snapbynet:用于XL下根据net来匹配吸附，默认nil。此项关闭时，上面"line"方式会根据画线的方向来选择吸附后交叉与否。
+			?rmmpp:是否不对MPP操作，默认nil。此项开启时，会将MPP的金属层复制并延伸来做吸附操作。
+			?addvia:是否打孔，默认nil。因为打孔的情况太多很多时候需要手动调整，开启时会在交叉点打1x1的孔。
+			?viamin:打孔的最小规格，输入为list。例如list(2 1)表示横向两个孔，纵向一个孔。
+			
+		AutoSnapByClicks()
+			AutoSnapByHi(?mode "click")的连击模式。
+*/
+
+hiSetBindKey("Layout" "<Key>T" "AutoSnapByClicks()")
+procedure(AutoSnapByClicks()
+	prog((flag)
+		while(t
+			flag = AutoSnapByHi(
+				?mode "click"
+			)
+			if(flag == "esc" then
+				return(nil)
+			)
+		)
+	)
+)
+procedure(AutoSnapByHi(@key
+	cv(geGetEditRep())
+	mode("click")
+	snapbynet(nil)
+	rmmpp(t)
+	addvia(nil)
+	viamin(list(1 1))
+	)
+	prog((snaplayer win range selbox getfig line1 line2 getfig1 getfig2 getpathsegs vpathsegs hpathsegs vbegindist venddist vdists hbegindist henddist hdists vdists_sort hdists_sort vctrl hctrl junction justify)
+		;添加你想要操作到的layer
+		snaplayer = list("POLY" "MET1" "MET2" "MET3")
+		
+		win = geGetCellViewWindow(cv)
+		
+		case(mode
+			("click"
+				range = 1
+				unless(ep = enterPoint()
+					return("esc")
+				)
+				selbox = list(
+					(xCoord(ep) - range) : (yCoord(ep) - range)
+					(xCoord(ep) + range) : (yCoord(ep) + range)
+				)
+				getfig = dbGetOverlaps(cv selbox)
+			)
+			("line"
+				unless(line1 = enterLine(?wantPoints 2)
+					return("esc")
+				)
+				unless(line2 = enterLine(?wantPoints 2)
+					return("esc")
+				)
+				getfig1 = geGetSortedSelectByLine(win line1)
+				getfig2 = geGetSortedSelectByLine(win line2)
+				geDeselectAll()
+				foreach(x append(getfig1 getfig2)
+					getfig = append1(getfig car(x))
+				)
+			)
+		)
+		if(rmmpp == t then
+			;删除所有MPP
+			getfig = RmMPP(getfig)
+		)
+		getfig = setof(x getfig InListp(x~>layerName snaplayer))
+		case(length(getfig)
+			(0
+				println("no fig")
+				return(nil)
+			)
+			(1
+				println("only one fig")
+				return(nil)
+			)
+		)
+		foreach(x getfig
+			case(x~>objType
+				("path"
+					leConvertShapeToPathSeg(x)
+				)
+				("pathSeg"
+					leConvertShapeToPathSeg(leConvertShapeToPolygon(x))
+					;leConvertShapeToPolygon貌似有bug，PathsegToPolygon并没有Convert，而是create，所以旧的要删除
+					dbDeleteObject(x)
+				)
+			)
+		)
+		;再次getfig
+		case(mode
+			("click"
+				getfig = dbGetOverlaps(cv selbox)
+			)
+			("line"
+				getfig1 = geGetSortedSelectByLine(win line1)
+				getfig2 = geGetSortedSelectByLine(win line2)
+				geDeselectAll()
+				getfig = nil
+				foreach(x append(getfig1 getfig2)
+					getfig = append1(getfig car(x))
+				)
+			)
+		)
+		if(rmmpp == t then
+			;删除所有MPP
+			getfig = RmMPP(getfig)
+		)
+		;筛选出pathSeg
+		getpathsegs = setof(x getfig
+			InListp(x~>layerName snaplayer) && x~>objType == "pathSeg"
+		)
+		;筛选出垂直的
+		vpathsegs = setof(x getpathsegs
+			abs(xCoord(x~>beginPt) - xCoord(x~>endPt)) < 1e-6
+		)
+		;筛选出水平的
+		hpathsegs = setof(x getpathsegs
+			abs(yCoord(x~>beginPt) - yCoord(x~>endPt)) < 1e-6
+		)
+		unless(car(vpathsegs) && car(hpathsegs)
+			printf("input arg must be a list containing two mutually perpendicular pathseg")
+			return(nil)
+		)
+		case(mode
+			("click"
+				foreach(v vpathsegs
+					vbegindist = HowFar(ep v~>beginPt)
+					venddist = HowFar(ep v~>endPt)
+					vdists = append1(vdists min(vbegindist venddist))
+				)
+				foreach(h hpathsegs
+					hbegindist = HowFar(ep h~>beginPt)
+					henddist = HowFar(ep h~>endPt)
+					hdists = append1(hdists min(hbegindist henddist))
+				)
+				
+				vdists_sort = SortList(vdists)
+				hdists_sort = SortList(hdists)
+				for(x 0 length(vpathsegs) - 1
+					if(nth(x vdists_sort) == 0 then
+						vctrl = nth(x vpathsegs)
+					)
+				)
+				for(x 0 length(hpathsegs) - 1
+					if(nth(x hdists_sort) == 0 then
+						hctrl = nth(x hpathsegs)
+					)
+				)
+				junction = AutoSnap(list(vctrl hctrl))
+				if(addvia then
+					AutoAddVia(
+						?cv cv
+						?junction junction
+						?pathsegref list(vctrl hctrl)
+						?justify justify
+					)
+				)
+			)
+			("line"
+				case(snapbynet
+					(nil
+						mapcar(
+							lambda((v h)
+								junction = AutoSnap(list(v h))
+								if(addvia then
+									AutoAddVia(
+										?cv cv
+										?junction junction
+										?pathsegref list(v h)
+										?justify justify
+									)
+								)
+							)
+							vpathsegs
+							hpathsegs
+						)
+					)
+					(t
+						foreach(v vpathsegs
+							hctrl = car(setof(h hpathsegs h~>net~>name == v~>net~>name))
+							junction = AutoSnap(list(v hctrl))
+							if(addvia then
+								AutoAddVia(
+									?cv cv
+									?junction junction
+									?pathsegref list(v hctrl)
+									?justify justify
+								)
+							)
+						)
+					)
+				)
+			)
+		)
+	)
+)
+procedure(AutoSnap(pathsegs)
+	prog((vctrl hctrl junction vbegindist venddist vcallback voffset hcallback hoffset)
+		vctrl = car(setof(x pathsegs abs(xCoord(x~>beginPt) - xCoord(x~>endPt)) < 1e-6))
+		hctrl = car(setof(x pathsegs abs(yCoord(x~>beginPt) - yCoord(x~>endPt)) < 1e-6))
+		unless(vctrl && hctrl
+			printf("input arg must be a list containing two mutually perpendicular pathseg")
+			return(nil)
+		)
+		junction = xCoord(centerBox(vctrl~>bBox)) : yCoord(centerBox(hctrl~>bBox))
+		vbegindist = HowFar(junction vctrl~>beginPt)
+		venddist = HowFar(junction vctrl~>endPt)
+		cond(
+			(vbegindist < venddist
+				vcallback = "vctrl~>beginPt = rodAddToY(vctrl~>beginPt voffset)"
+				voffset = yCoord(junction) - yCoord(vctrl~>beginPt)
+				cond(
+					(yCoord(vctrl~>beginPt) > yCoord(vctrl~>endPt)
+						voffset += hctrl~>width / 2
+					)
+					(yCoord(vctrl~>beginPt) < yCoord(vctrl~>endPt)
+						voffset -= hctrl~>width / 2
+					)
+				)
+			)
+			(t
+				vcallback = "vctrl~>endPt = rodAddToY(vctrl~>endPt voffset)"
+				voffset = yCoord(junction) - yCoord(vctrl~>endPt)
+				cond(
+					(yCoord(vctrl~>endPt) > yCoord(vctrl~>beginPt)
+						voffset += hctrl~>width / 2
+					)
+					(yCoord(vctrl~>endPt) > yCoord(vctrl~>beginPt)
+						voffset -= hctrl~>width / 2
+					)
+				)
+			)
+		)
+		hbegindist = HowFar(junction hctrl~>beginPt)
+		henddist = HowFar(junction hctrl~>endPt)
+		cond(
+			(hbegindist < henddist	
+				hcallback = "hctrl~>beginPt = rodAddToX(hctrl~>beginPt hoffset)"
+				hoffset = xCoord(junction) - xCoord(hctrl~>beginPt)
+				cond(
+					(xCoord(hctrl~>beginPt) > xCoord(hctrl~>endPt)
+						hoffset += vctrl~>width / 2
+					)
+					(xCoord(hctrl~>beginPt) < xCoord(hctrl~>endPt)
+						hoffset -= vctrl~>width / 2
+					)
+				)
+			)
+			(t
+				hcallback = "hctrl~>endPt = rodAddToX(hctrl~>endPt hoffset)"
+				hoffset = xCoord(junction) - xCoord(hctrl~>endPt)
+				cond(
+					(xCoord(hctrl~>endPt) > xCoord(hctrl~>beginPt)
+						hoffset += vctrl~>width / 2
+					)
+					(xCoord(hctrl~>endPt) < xCoord(hctrl~>beginPt)
+						hoffset -= vctrl~>width / 2
+					)
+				)
+			)
+		)
+		evalstring(vcallback)
+		evalstring(hcallback)
+		return(junction)
+	)
+)
+procedure(AutoAddVia(@key
+	cv(geGetEditRep())
+	junction(nil)
+	pathsegref(list(nil nil))
+	justify("centerCenter")
+	viamin(list(1 1))
+	)
+	prog((wirelayer viadefname tech viacolumns viarows)
+		;用于连线的layer，从下往上。
+		wirelayer = list(
+			"POLY"
+			"MET1"
+			"MET2"
+			"MET3"
+		)
+		;孔的名称，从下往上。
+		viadefname = list(
+			"M1_POLYc"
+			"M2_M1c"
+			"M3_M2c"
+		)
+		tech = techGetTechFile(cv)
+		
+		viacolumns = xCoord(viamin)
+		viarows = yCoord(viamin)
+		
+		for(x 0 length(viadefname) - 1
+			if(InListp(nth(x wirelayer) pathsegref~>layerName) && InListp(nth(x + 1 wirelayer) pathsegref~>layerName) then
+				dbCreateVia(cv techFindViaDefByName(tech nth(x viadefname)) junction "R0"
+					list(
+						list("cutColumns" viacolumns)
+						list("cutRows" viarows)
+						list("originOffset" 0 : 0)
+					)
+				)
+			)
+		)
+	)
+)
+procedure(RmMPP(layers)
+	prog((rodlayers sublayers mpplayers output)
+		rodlayers = setof(x layers rodGetObj(x))
+		foreach(x rodlayers
+			sublayers = append(sublayers rodGetObj(x)~>subShapes)
+		)
+		mpplayers = append(rodlayers sublayers)
+		output = setof(x layers (!InListp(x mpplayers)))
+		return(output)
+	)
+)
+unless(fboundp('HowFar)
+	procedure(HowFar(a b)
+		prog(()
+			return(sqrt((car(a) - car(b)) ** 2 + (cadr(a) - cadr(b)) ** 2))
+		)
+	)
+)
+unless(fboundp('SortList)
+	procedure(SortList(numlist)
+		prog((size sort)
+			foreach(main numlist
+				size = 0
+				foreach(num numlist
+					if(main > num then
+						++size
+					)
+				)
+				sort = append1(sort size)
+			)
+			return(sort)
+		)
+	)
+)
+unless(fboundp('InListp)
+	procedure(InListp(scan keylist)
+		prog((times)
+			times = 0
+			foreach(key keylist
+				if(scan == key then
+					times++
+				)
+			)
+			if(times > 0 then
+				return(times)
+				else
+					return(nil)
+			)
+		)
+	)
+)
